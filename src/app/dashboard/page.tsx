@@ -1,0 +1,182 @@
+import Link from "next/link";
+import { redirect } from "next/navigation";
+
+import { AlertChannelSettings } from "@/components/AlertChannelSettings";
+import { SessionUserPanel } from "@/components/auth/SessionUserPanel";
+import { IncidentTimeline } from "@/components/IncidentTimeline";
+import { LatencyChart } from "@/components/LatencyChart";
+import { MonitorCreateForm } from "@/components/MonitorCreateForm";
+import { MonitorTable } from "@/components/MonitorTable";
+import { PerformancePanel } from "@/components/PerformancePanel";
+import { ProjectCreateForm } from "@/components/ProjectCreateForm";
+import { ProjectSwitcher } from "@/components/ProjectSwitcher";
+import { RegionStatusTable } from "@/components/RegionStatusTable";
+import { StatCard } from "@/components/StatCard";
+import { getAlertChannels, getDashboardData } from "@/lib/queries";
+import { getSessionUserId } from "@/lib/serverSession";
+
+type DashboardPageProps = {
+  searchParams?: {
+    projectId?: string;
+  };
+};
+
+export default async function DashboardPage({ searchParams }: DashboardPageProps) {
+  const userId = await getSessionUserId();
+  if (!userId) {
+    redirect("/login?next=/dashboard");
+  }
+
+  const activeProjectId = searchParams?.projectId ?? null;
+  const { projects, monitors, incidents, stats, metrics } = await getDashboardData(userId, activeProjectId);
+  const channels = await getAlertChannels(userId, activeProjectId);
+  const chartMonitor = monitors.find((monitor) => monitor.latencyLogs.length > 0) ?? monitors[0];
+
+  return (
+    <main className="mx-auto flex min-h-screen w-full max-w-[1400px] flex-col gap-5 px-3 py-5 sm:px-6 md:gap-7 md:px-8 lg:px-10 xl:py-8">
+      <header className="glass-card rounded-2xl border p-4 sm:p-5 md:p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="min-w-0">
+            <p className="text-xs uppercase tracking-[0.24em] text-text-muted">
+              API Monitoring Platform
+            </p>
+            <h1 className="mt-2 text-3xl font-bold tracking-tight text-text-primary sm:text-4xl">
+              Dashboard
+            </h1>
+            <p className="mt-2 text-sm text-text-secondary">
+              Real-time uptime, incidents, and latency telemetry.
+            </p>
+            <div className="mt-3">
+              <ProjectSwitcher projects={projects} activeProjectId={activeProjectId} />
+            </div>
+          </div>
+          <nav className="flex w-full flex-wrap items-stretch gap-2 sm:items-center sm:gap-3 lg:w-auto lg:justify-end">
+            <Link href="/status" className="btn-soft flex-1 text-center sm:flex-none">
+              Status Page
+            </Link>
+            <Link href="/incidents" className="btn-soft flex-1 text-center sm:flex-none">
+              Incidents
+            </Link>
+            <SessionUserPanel />
+          </nav>
+        </div>
+      </header>
+
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
+        <StatCard label="Total Monitors" value={stats.totalMonitors} />
+        <StatCard label="Healthy" value={stats.upMonitors} tone="good" />
+        <StatCard label="Down" value={stats.downMonitors} tone="bad" />
+        <StatCard label="Paused" value={stats.pausedMonitors} tone="warn" />
+        <StatCard
+          label="Open Incidents"
+          value={stats.openIncidents}
+          tone={stats.openIncidents > 0 ? "bad" : "info"}
+        />
+        <StatCard label="Avg Latency" value={`${stats.avgLatencyMs} ms`} tone="info" />
+      </section>
+
+      <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <Link
+          href="/repos"
+          className="glass-card card-interactive rounded-xl border p-4"
+        >
+          <p className="text-xs uppercase tracking-[0.12em] text-text-muted">GitHub Analyzer</p>
+          <p className="mt-2 text-lg font-semibold text-text-primary">Repositories</p>
+          <p className="mt-1 text-sm text-text-secondary">Scan repository backend files and store snippets.</p>
+        </Link>
+        <Link
+          href="/monitor"
+          className="glass-card card-interactive rounded-xl border p-4"
+        >
+          <p className="text-xs uppercase tracking-[0.12em] text-text-muted">Failure Signals</p>
+          <p className="mt-2 text-lg font-semibold text-text-primary">API Monitor Logs</p>
+          <p className="mt-1 text-sm text-text-secondary">View recent UP/DOWN status logs and error details.</p>
+        </Link>
+        <Link
+          href="/analysis"
+          className="glass-card card-interactive rounded-xl border p-4"
+        >
+          <p className="text-xs uppercase tracking-[0.12em] text-text-muted">AI Debugging</p>
+          <p className="mt-2 text-lg font-semibold text-text-primary">Analysis Reports</p>
+          <p className="mt-1 text-sm text-text-secondary">Root cause, fixes, and probable file suggestions.</p>
+        </Link>
+      </section>
+
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+        <div className="lg:col-span-8">
+          <MonitorCreateForm projects={projects} activeProjectId={activeProjectId} />
+        </div>
+        <div className="lg:col-span-4">
+          <ProjectCreateForm />
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-text-primary md:text-xl">Monitors</h2>
+            <p className="text-sm text-text-secondary">Manage checks, status, and runtime actions.</p>
+          </div>
+        </div>
+        <MonitorTable monitors={monitors} />
+      </section>
+
+      <section className="space-y-3">
+        <div>
+          <h2 className="text-lg font-semibold text-text-primary md:text-xl">Regional Status</h2>
+          <p className="text-sm text-text-secondary">Multi-region check view (India, US, Europe).</p>
+        </div>
+        <RegionStatusTable monitors={monitors} />
+      </section>
+
+      <section className="space-y-3">
+        <div>
+          <h2 className="text-lg font-semibold text-text-primary md:text-xl">Performance Metrics</h2>
+          <p className="text-sm text-text-secondary">
+            Average latency, P95, error rate, status code and uptime trends.
+          </p>
+        </div>
+        <PerformancePanel metrics={metrics} />
+      </section>
+
+      <section className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+        <div className="space-y-3 lg:col-span-7">
+          <div className="flex items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-text-primary md:text-xl">Latency Trend</h2>
+              <p className="text-sm text-text-secondary">Performance history per monitor.</p>
+            </div>
+            {chartMonitor ? (
+              <p className="rounded-full border border-border-accent bg-accent/10 px-3 py-1 text-xs text-text-secondary">
+                Source: {chartMonitor.name}
+              </p>
+            ) : null}
+          </div>
+          {chartMonitor ? (
+            <LatencyChart data={chartMonitor.latencyLogs} />
+          ) : (
+            <div className="glass-card rounded-2xl border border-dashed p-6 text-sm text-text-muted">
+              Add a monitor to start collecting latency data.
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-3 lg:col-span-5">
+          <div>
+            <h2 className="text-lg font-semibold text-text-primary md:text-xl">
+              Recent Incident Timeline
+            </h2>
+            <p className="text-sm text-text-secondary">Auto-detected failures and recoveries.</p>
+          </div>
+          <IncidentTimeline incidents={incidents} />
+        </div>
+      </section>
+
+      <AlertChannelSettings
+        projects={projects}
+        activeProjectId={activeProjectId}
+        channels={channels}
+      />
+    </main>
+  );
+}

@@ -1,0 +1,244 @@
+import { connectToDatabase } from "@/lib/db";
+import {
+  sendMonitorDownEmail,
+  sendMonitorHighLatencyEmail,
+  sendMonitorRecoveredEmail,
+} from "@/lib/mail";
+import AlertChannel from "@/models/AlertChannel";
+import Monitor from "@/models/Monitor";
+import User from "@/models/User";
+import type { MonitorRegion } from "@/models/Monitor";
+
+type AlertEventType = "down" | "recovery" | "high_latency";
+
+type AlertPayload = {
+  userId: string;
+  userEmail?: string | null;
+  eventType: AlertEventType;
+  projectId?: string | null;
+  monitorName: string;
+  monitorUrl: string;
+  region: MonitorRegion;
+  checkedAt: Date;
+  responseTimeMs: number | null;
+  statusCode: number | null;
+  errorMessage?: string | null;
+  incidentId?: string;
+};
+
+function looksLikeEmail(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.length < 6 || trimmed.length > 254) return false;
+  // Pragmatic check: enough to avoid obviously-non-email userIds (e.g. Firebase UID).
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+}
+
+function getFallbackRecipientsForUser(userId: string) {
+  return looksLikeEmail(userId) ? [userId.trim()] : undefined;
+}
+
+function getFallbackRecipients(payload: Pick<AlertPayload, "userId" | "userEmail">) {
+  if (payload.userEmail && looksLikeEmail(payload.userEmail)) {
+    return [payload.userEmail.trim().toLowerCase()];
+  }
+  return getFallbackRecipientsForUser(payload.userId);
+}
+
+async function resolveFallbackRecipients(payload: Pick<AlertPayload, "userId" | "userEmail">) {
+  const direct = getFallbackRecipients(payload);
+  if (direct && direct.length > 0) {
+    return direct;
+  }
+
+  const monitorWithOwnerEmail = await Monitor.findOne({
+    userId: payload.userId,
+    ownerEmail: { $type: "string", $ne: "" },
+  })
+    .sort({ updatedAt: -1 })
+    .select("ownerEmail")
+    .lean<{ ownerEmail?: string | null } | null>();
+
+  const ownerEmail = monitorWithOwnerEmail?.ownerEmail?.trim().toLowerCase() ?? "";
+  if (looksLikeEmail(ownerEmail)) {
+    return [ownerEmail];
+  }
+
+  // Final fallback: resolve from user profile for authId-based tenants.
+  const user = await User.findOne({
+    $or: [{ authId: payload.userId }, { email: payload.userId }],
+  })
+    .select("email")
+    .lean<{ email?: string | null } | null>();
+  const profileEmail = user?.email?.trim().toLowerCase() ?? "";
+  if (looksLikeEmail(profileEmail)) {
+    return [profileEmail];
+  }
+
+  return undefined;
+}
+
+async function postJsonWebhook(url: string, body: Record<string, unknown>) {
+  if (!url) return false;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return response.ok;
+  } catch (error) {
+    console.error("[alerts] webhook send failed", error);
+    return false;
+  }
+}
+
+async function sendEmailAlert(to: string[] | undefined, payload: AlertPayload) {
+  if (payload.eventType === "down") {
+    return sendMonitorDownEmail({
+      to,
+      monitorName: payload.monitorName,
+      monitorUrl: payload.monitorUrl,
+      incidentId: payload.incidentId ?? "N/A",
+      checkedAt: payload.checkedAt,
+      responseTimeMs: payload.responseTimeMs,
+      statusCode: payload.statusCode,
+      errorMessage: payload.errorMessage,
+    });
+  }
+
+  if (payload.eventType === "recovery") {
+    return sendMonitorRecoveredEmail({
+      to,
+      monitorName: payload.monitorName,
+      monitorUrl: payload.monitorUrl,
+      incidentId: payload.incidentId ?? "N/A",
+      checkedAt: payload.checkedAt,
+      responseTimeMs: payload.responseTimeMs,
+      statusCode: payload.statusCode,
+      errorMessage: payload.errorMessage,
+    });
+  }
+
+  if (payload.responseTimeMs !== null) {
+    return sendMonitorHighLatencyEmail({
+      to,
+      monitorName: payload.monitorName,
+      monitorUrl: payload.monitorUrl,
+      checkedAt: payload.checkedAt,
+      responseTimeMs: payload.responseTimeMs,
+      statusCode: payload.statusCode,
+    });
+  }
+
+  return false;
+}
+
+async function sendChannelAlert(channel: {
+  type: "email" | "slack" | "discord" | "telegram";
+  config: Record<string, unknown>;
+}, payload: AlertPayload, fallbackRecipients?: string[]) {
+  const title = `[${payload.eventType.toUpperCase()}] ${payload.monitorName} (${payload.region})`;
+  const message = payload.errorMessage ?? "No additional error context.";
+
+  if (channel.type === "email") {
+    const recipients = String(channel.config.recipients ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    // If channel recipients are empty, default to resolved user mailbox
+    // instead of env-level ALERT_EMAIL_TO.
+    const resolvedRecipients = recipients.length > 0 ? recipients : fallbackRecipients;
+    return sendEmailAlert(resolvedRecipients, payload);
+  }
+
+  if (channel.type === "slack") {
+    const webhookUrl = String(channel.config.webhookUrl ?? "");
+    return postJsonWebhook(webhookUrl, {
+      text: `${title}\nURL: ${payload.monitorUrl}\nLatency: ${payload.responseTimeMs ?? "N/A"} ms\nStatus: ${payload.statusCode ?? "N/A"}\n${message}`,
+    });
+  }
+
+  if (channel.type === "discord") {
+    const webhookUrl = String(channel.config.webhookUrl ?? "");
+    return postJsonWebhook(webhookUrl, {
+      content: `${title}\nURL: ${payload.monitorUrl}\nLatency: ${payload.responseTimeMs ?? "N/A"} ms\nStatus: ${payload.statusCode ?? "N/A"}\n${message}`,
+    });
+  }
+
+  if (channel.type === "telegram") {
+    const botToken = String(channel.config.botToken ?? "");
+    const chatId = String(channel.config.chatId ?? "");
+    if (!botToken || !chatId) return false;
+
+    const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+    return postJsonWebhook(telegramUrl, {
+      chat_id: chatId,
+      text: `${title}\n${payload.monitorUrl}\nLatency: ${payload.responseTimeMs ?? "N/A"} ms\nStatus: ${payload.statusCode ?? "N/A"}\n${message}`,
+    });
+  }
+
+  return false;
+}
+
+function shouldSendForEvent(
+  eventType: AlertEventType,
+  events: { onDown: boolean; onRecovery: boolean; onHighLatency: boolean } | undefined,
+) {
+  if (!events) return false;
+  if (eventType === "down") return events.onDown;
+  if (eventType === "recovery") return events.onRecovery;
+  return events.onHighLatency;
+}
+
+export async function dispatchAlert(payload: AlertPayload) {
+  await connectToDatabase();
+
+  const channels = await AlertChannel.find({
+    enabled: true,
+    userId: payload.userId,
+    $or: [{ projectId: payload.projectId ?? null }, { projectId: null }],
+  })
+    .select("type config events")
+    .lean();
+
+  const sendableChannels = channels.filter((channel) =>
+    shouldSendForEvent(payload.eventType, channel.events),
+  );
+
+  const fallbackRecipients = await resolveFallbackRecipients(payload);
+  const hasSendableEmailChannel = sendableChannels.some((channel) => channel.type === "email");
+
+  // Always send an email to the owning user when we can infer their mailbox,
+  // unless they explicitly configured an email channel for this event.
+  if (fallbackRecipients && !hasSendableEmailChannel) {
+    await sendEmailAlert(fallbackRecipients, payload);
+  }
+
+  if (sendableChannels.length === 0) {
+    // If we couldn't infer a user mailbox, only fall back to env recipients in non-production.
+    if (!fallbackRecipients) {
+      if (process.env.NODE_ENV !== "production") {
+        await sendEmailAlert(undefined, payload);
+      } else {
+        console.warn(
+          `[alerts] No recipient resolved for userId "${payload.userId}" in production.`,
+        );
+      }
+    }
+    return;
+  }
+
+  await Promise.all(
+    sendableChannels.map((channel) =>
+      sendChannelAlert(
+        {
+          type: channel.type,
+          config: (channel.config as Record<string, unknown>) ?? {},
+        },
+        payload,
+        fallbackRecipients,
+      ),
+    ),
+  );
+}

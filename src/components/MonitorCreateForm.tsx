@@ -1,0 +1,97 @@
+﻿"use client";
+
+import { useFormState } from "react-dom";
+
+import { createMonitorAction } from "@/app/actions/monitorActions";
+import { SubmitButton } from "@/components/SubmitButton";
+import type { ProjectView } from "@/lib/queries";
+
+type MonitorCreateFormProps = {
+  projects: ProjectView[];
+  activeProjectId: string | null;
+};
+
+export function MonitorCreateForm({ projects, activeProjectId }: MonitorCreateFormProps) {
+  const initialMonitorActionState = { status: "idle", message: "" } as const;
+  const [state, formAction] = useFormState(createMonitorAction, initialMonitorActionState);
+  const hasProjects = projects.length > 0;
+
+  return (
+    <section className="glass-card rounded-2xl border p-5 md:p-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-text-primary md:text-xl">Create Monitor</h2>
+          <p className="mt-1 text-sm text-text-secondary">
+            Add endpoint health checks with async queue execution.
+          </p>
+        </div>
+      </div>
+
+      <p className="mt-2 text-sm text-text-secondary">
+        Add an endpoint and start asynchronous checks immediately.
+      </p>
+
+      <form action={formAction} className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {hasProjects ? (
+          <select
+            name="projectId"
+            defaultValue={activeProjectId ?? projects[0]?.id ?? ""}
+            className="px-3.5 py-2.5 text-sm"
+          >
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="rounded-btn border border-dashed border-border-accent bg-surface-card/40 px-3.5 py-2.5 text-sm text-text-muted">
+            No project yet. Create one first.
+          </div>
+        )}
+        <input
+          name="name"
+          placeholder="Name (optional)"
+          className="px-3.5 py-2.5 text-sm"
+        />
+        <input
+          required
+          type="url"
+          name="url"
+          placeholder="https://api.example.com/health"
+          className="px-3.5 py-2.5 text-sm sm:col-span-2 lg:col-span-2"
+        />
+        <select
+          name="intervalMinutes"
+          defaultValue="1"
+          className="px-3.5 py-2.5 text-sm"
+        >
+          <option value="1">1 min</option>
+          <option value="5">5 min</option>
+          <option value="10">10 min</option>
+        </select>
+
+        <input type="hidden" name="timeoutMs" value="10000" />
+
+        <div className="flex flex-col items-start justify-between gap-3 sm:col-span-2 lg:col-span-4 md:flex-row md:items-center">
+          <p
+            className={`text-sm ${
+              state.status === "error"
+                ? "text-rose-400"
+                : state.status === "success"
+                  ? "text-emerald-400"
+                  : "text-text-muted"
+            }`}
+          >
+            {state.message || "Checks run in the background worker queue."}
+          </p>
+          <SubmitButton
+            label="Add Monitor"
+            pendingLabel="Creating..."
+            disabled={!hasProjects}
+          />
+        </div>
+      </form>
+    </section>
+  );
+}

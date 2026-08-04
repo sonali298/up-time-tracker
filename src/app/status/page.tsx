@@ -1,0 +1,139 @@
+﻿import type { Metadata } from "next";
+import { redirect } from "next/navigation";
+
+import { IncidentHistory } from "@/components/status/IncidentHistory";
+import {
+  MonitorStatusTable,
+  type PublicMonitorRow,
+} from "@/components/status/MonitorStatusTable";
+import { PublicLatencyChart } from "@/components/status/PublicLatencyChart";
+import { StatCard } from "@/components/StatCard";
+import { formatDateTime } from "@/lib/format";
+import { getDashboardData, getIncidents, getStatusMonitors } from "@/lib/queries";
+import { getSessionUserId } from "@/lib/serverSession";
+import { calculateUptimePercentage } from "@/lib/uptime";
+
+export const revalidate = 60;
+
+export const metadata: Metadata = {
+  title: "Status Page | API Monitor Platform",
+  description:
+    "Public real-time API status page with uptime, latency, and recent incidents.",
+};
+
+function averageLatency(
+  latencyLogs: { responseTimeMs: number | null }[],
+): number | null {
+  const values = latencyLogs
+    .map((entry) => entry.responseTimeMs)
+    .filter((value): value is number => value !== null && !Number.isNaN(value));
+
+  if (values.length === 0) return null;
+  return Math.round(values.reduce((acc, value) => acc + value, 0) / values.length);
+}
+
+export default async function StatusPage() {
+  const userId = await getSessionUserId();
+  if (!userId) {
+    redirect("/login?next=/status");
+  }
+
+  const [monitors, incidents, dashboardData] = await Promise.all([
+    getStatusMonitors(undefined, userId),
+    getIncidents(30, userId),
+    getDashboardData(userId),
+  ]);
+
+  const lastIncidentByMonitor = new Map<string, string>();
+  const incidentFailuresByMonitor = new Map<string, number>();
+  for (const incident of incidents) {
+    const existing = lastIncidentByMonitor.get(incident.monitorId);
+    const candidate = incident.lastFailureAt ?? incident.startedAt;
+    const currentFailures = incidentFailuresByMonitor.get(incident.monitorId) ?? 0;
+
+    if (!existing || new Date(candidate).getTime() > new Date(existing).getTime()) {
+      lastIncidentByMonitor.set(incident.monitorId, candidate);
+    }
+
+    incidentFailuresByMonitor.set(
+      incident.monitorId,
+      currentFailures + (incident.failureCount ?? 0),
+    );
+  }
+
+  const monitorRows: PublicMonitorRow[] = monitors.map((monitor) => ({
+    id: monitor.id,
+    name: monitor.name,
+    status: monitor.status,
+    uptimePercentage: calculateUptimePercentage({
+      totalChecks: monitor.totalChecks,
+      failureCount: monitor.totalFailures,
+      monitoringHistory: monitor.latencyLogs,
+      incidentFailureCount: incidentFailuresByMonitor.get(monitor.id),
+    }),
+    avgLatencyMs: averageLatency(monitor.latencyLogs),
+    lastCheckedAt: monitor.lastCheckedAt,
+    lastIncidentAt: lastIncidentByMonitor.get(monitor.id) ?? null,
+  }));
+
+  const generatedAt =
+    monitors
+      .map((monitor) => monitor.lastCheckedAt)
+      .filter((value): value is string => Boolean(value))
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ??
+    new Date().toISOString();
+
+  const allOperational =
+    monitorRows.length > 0 &&
+    monitorRows.every((row) => row.status === "up" || row.status === "paused");
+
+  return (
+    <main className="mx-auto min-h-screen w-full max-w-[1300px] px-4 py-6 sm:px-6 md:px-8 lg:px-10 xl:py-8">
+      <header className="glass-card mb-6 rounded-2xl border p-5 md:p-6">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] text-text-muted">Public Status</p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-text-primary md:text-4xl">
+            API Health Status
+          </h1>
+          <p className="mt-2 text-sm text-text-secondary">
+            {`Showing monitors for ${userId}.`} Last checked at {formatDateTime(generatedAt)}.
+          </p>
+        </div>
+      </header>
+
+      <section
+        className={`mb-6 rounded-2xl border px-4 py-3 ${
+          allOperational
+            ? "border-status-up/40 bg-status-up/10 text-status-up shadow-[0_0_18px_rgba(34,197,94,0.2)]"
+            : "border-status-degraded/40 bg-status-degraded/10 text-status-degraded shadow-[0_0_18px_rgba(234,179,8,0.2)]"
+        }`}
+      >
+        <p className="text-sm font-semibold">
+          {allOperational ? "All Systems Operational" : "Partial Service Disruption"}
+        </p>
+      </section>
+
+      <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Services" value={dashboardData.stats.totalMonitors} />
+        <StatCard label="Healthy" value={dashboardData.stats.upMonitors} tone="good" />
+        <StatCard label="Down" value={dashboardData.stats.downMonitors} tone="bad" />
+        <StatCard label="Avg Latency" value={`${dashboardData.stats.avgLatencyMs} ms`} tone="info" />
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold text-text-primary md:text-xl">Monitors</h2>
+        <MonitorStatusTable rows={monitorRows} />
+      </section>
+
+      <section className="mt-6 space-y-3">
+        <h2 className="text-lg font-semibold text-text-primary md:text-xl">Latency</h2>
+        <PublicLatencyChart data={dashboardData.metrics.responseTrend} />
+      </section>
+
+      <section className="mt-6 space-y-3 pb-4">
+        <h2 className="text-lg font-semibold text-text-primary md:text-xl">Recent Incident History</h2>
+        <IncidentHistory incidents={incidents} />
+      </section>
+    </main>
+  );
+}
