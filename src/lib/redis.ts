@@ -1,10 +1,10 @@
 import IORedis from "ioredis";
+import type { RedisOptions } from "ioredis";
 
-// Upstash ke hisaab se options update kar diye
-const redisOptions: any = {
+const redisOptions: RedisOptions = {
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
-  family: 0, 
+  family: 0,
 };
 
 // Agar Upstash/rediss use ho raha hai, toh TLS (security) on karna padega
