@@ -289,4 +289,4 @@ npm run build
 ---
 
 ## 👨‍💻 Author
-**Anshu Kumar Mandal**
+**Sonali Bara**
